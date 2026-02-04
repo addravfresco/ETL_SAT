@@ -1,0 +1,13 @@
+# Entornos virtuales
+.venv/
+env/
+venv/
+
+# Configuracion y secretos
+.env
+
+# Archivos temporales y logs
+logs/
+temp_processing/
+__pycache__/
+*.pyc

@@ -1,0 +1,8 @@
+polars==1.37.1
+pyarrow==23.0.0
+pyodbc==5.3.0
+SQLAlchemy==2.0.46
+python-dotenv==1.2.1
+fastexcel==0.19.0
+python-calamine==0.6.1
+tqdm==4.67.1

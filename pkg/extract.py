@@ -1,5 +1,7 @@
 import polars as pl
+
 from pkg.globals import *
+
 
 def get_sat_reader(ruta_archivo, batch_size=50000, schema=None):
     """
@@ -18,8 +20,9 @@ def get_sat_reader(ruta_archivo, batch_size=50000, schema=None):
         batch_size=batch_size,
         schema_overrides=schema,
         ignore_errors=True,
-        truncate_ragged_lines=True
+        truncate_ragged_lines=True,
     )
+
 
 def get_sample_data(reader, num_batches=1):
     """

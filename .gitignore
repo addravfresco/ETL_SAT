@@ -1,13 +1,18 @@
-# Entornos virtuales
-.venv/
-env/
-venv/
+# --- Archivos Forenses y Temporales (NO SUBIR) ---
+Evidencia_Origen.txt
+Mojibake_600.csv
+Reporte_Mojibake_Completo.csv
+scan_mojibake.py
+verify_source.py
+verificar_origen.py
+check_encoding.py
+test_crash.py
+test.py
+diagnostico.py
 
-# Configuracion y secretos
-.env
-
-# Archivos temporales y logs
-logs/
-temp_processing/
+# --- Python System Files ---
 __pycache__/
 *.pyc
+.venv/
+logs/
+*.log

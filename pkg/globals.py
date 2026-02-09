@@ -44,7 +44,7 @@ os.environ["TMPDIR"] = str(TEMP_DIR)
 os.environ["TEMP"] = str(TEMP_DIR)
 os.environ["TMP"] = str(TEMP_DIR)
 
-# --- DEFINICIÓN DE ESQUEMAS Y TIPOS (MOVIDO DESDE MAIN) ---
+# --- DEFINICIÓN DE ESQUEMAS Y TIPOS
 REGLAS_TIPOS = {
     "UUID": pl.Utf8,
     "Descuento": pl.Float64,

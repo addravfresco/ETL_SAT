@@ -1,119 +1,120 @@
 """
-File:           main.py
-Author:         Alan Damián Domínguez Romero
-Last Updated:   2026-02-03
-Version:        1.0
-Description:    Script principal para el proceso ETL del SAT para Facturas.
-                Realiza la extraccion de por lotes, transformacion de caracteres
-                especiales y carga validada en SQL Server.
-Dependencies:   polars, pyodbc, python-dotenv
-Usage:          Ejecutar 'python main.py' con acceso a la unidad V: y servidor SQL.
+MAIN.PY
+------------------------------------------------------------------------------
+Orquestador Principal del Proceso ETL SAT.
+Ejecuta el pipeline de extracción híbrida, transformación nativa y carga SQL.
 """
 
 import os
 import sys
-import time
+import traceback
 
-from pkg.enforcer import aplicar_tipos_seguros
-from pkg.extract import get_sat_reader
-from pkg.globals import *
-from pkg.load import upload_to_sql_blindado
-from pkg.reports import ETLReport
-from pkg.transform import transform_sat_batch
+# Configuración de salida: Forzar flush inmediato para visibilidad de logs.
+# Se utiliza 'getattr' o bloque try para compatibilidad con linters estáticos.
+try:
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(line_buffering=True)  # type: ignore
+except AttributeError:
+    pass
 
-REGLAS_TIPOS = {
-    "UUID": pl.Utf8,
-    "Descuento": pl.Float64,
-    "SubTotal": pl.Float64,
-    "Total": pl.Float64,
-    "TrasladosIVA": pl.Float64,
-    "TrasladosIEPS": pl.Float64,
-    "TotalImpuestosTrasladados": pl.Float64,
-    "RetenidosIVA": pl.Float64,
-    "RetenidosISR": pl.Float64,
-    "TotalImpuestosRetenidos": pl.Float64,
-    "TipoCambio": pl.Float64,
-}
-
-
-def imprimir_barra_progreso(actual, total, prefijo="", longitud=40):
-    """
-    Genera una representacion visual del progreso en la terminal.
-    Parametros:
-        actual (int): Valor de iteracion actual.
-        total (int): Valor objetivo de iteraciones.
-        prefijo (str): Texto descriptivo previo a la barra.
-        longitud (int): Tamaño visual de la barra de progreso.
-    """
-    porcentaje = "{0:.1f}".format(100 * (actual / float(total)))
-    llenado = int(longitud * actual // total)
-    barra = "█" * llenado + "-" * (longitud - llenado)
-    sys.stdout.write(f"\r{prefijo} |{barra}| {porcentaje}%")
-    sys.stdout.flush()
+try:
+    # Módulos del paquete ETL
+    from pkg.enforcer import aplicar_tipos_seguros
+    from pkg.extract import get_sat_reader
+    from pkg.globals import REGLAS_TIPOS, RUTA_COMPLETA_SAT
+    from pkg.load import upload_to_sql_blindado
+    from pkg.reports import ETLReport
+    from pkg.transform import transform_sat_batch
+except ImportError as e:
+    print(f"[FATAL] Error crítico de inicialización de módulos: {e}")
+    sys.exit(1)
 
 
 def main():
     """
-    Funcion principal que orquesta el flujo de extraccion, transformacion y carga.
-    Mantiene la simplicidad del flujo mediante el uso de modulos en 'pkg'.
+    Función de entrada principal (Entry Point).
+    Gestiona el ciclo de vida del ETL y el manejo de excepciones de alto nivel.
     """
-    archivo_fuente = RUTA_COMPLETA_SAT
-    tabla_destino = "FACTURAS_CABECERA_V2"
-    reporte = ETLReport()
+    print(">>> INICIANDO SISTEMA ETL SAT [MODO PRODUCCIÓN]")
 
-    if not archivo_fuente.exists():
-        print(f"Error: No se localizo el archivo fuente en la ruta: {archivo_fuente}")
+    # 1. Validación de entorno
+    if not RUTA_COMPLETA_SAT.exists():
+        print(f"[ERROR] Archivo fuente no accesible: {RUTA_COMPLETA_SAT}")
         return
 
-    tamano_total = os.path.getsize(archivo_fuente)
-    lotes_analizados = 0
+    # 2. Inicialización de métricas
+    file_size_gb = os.path.getsize(RUTA_COMPLETA_SAT) / (1024**3)
+    processed_batches = 0
+    report = ETLReport()
 
-    print(f"Iniciando procesamiento: {archivo_fuente.name}")
-    print(f"Tamano del archivo: {tamano_total / (1024**3):.2f} GB")
+    print(f"[INFO] Fuente: {RUTA_COMPLETA_SAT} | Tamaño: {file_size_gb:.2f} GB")
+    print("-" * 80)
 
     try:
-        # Inicializacion del lector batched de Polars
-        reader = get_sat_reader(str(archivo_fuente), batch_size=50000)
+        # 3. Inicialización del Lector Híbrido
+        # Se define un batch_size de 50k para balancear uso de RAM y I/O de red.
+        reader = get_sat_reader(str(RUTA_COMPLETA_SAT), batch_size=50000)
+        print("[INFO] Stream de lectura iniciado. Comenzando procesamiento...")
 
         while True:
+            # --- FASE A: EXTRACCIÓN (Extract) ---
             chunks = reader.next_batches(1)
-            if not chunks:
+
+            # Control de flujo: EOF o Lote Vacío termina el proceso
+            if chunks is None or len(chunks) == 0:
+                print("\n[INFO] Fin de archivo (EOF) alcanzado satisfactoriamente.")
                 break
 
-            df_lote = chunks[0]
-            lotes_analizados += 1
+            df_batch = chunks[0]
+            processed_batches += 1
+            row_count = len(df_batch)
 
-            # Transformacion y limpieza (Rescate de caracteres especiales)
-            df_procesado = transform_sat_batch(df_lote)
+            # Feedback de progreso en consola
+            print(f"[LOTE {processed_batches:04d}] Regs: {row_count:<6} | ", end="")
 
-            df_final = aplicar_tipos_seguros(df_procesado, REGLAS_TIPOS)
+            # --- FASE B: TRANSFORMACIÓN (Transform) ---
+            # Limpieza de mojibake utilizando motor Python (evita Stack Overflow de Polars)
+            df_processed = transform_sat_batch(df_batch)
+            print("Transform -> ", end="")
 
-            # Auditoria de calidad en tiempo real (Ejemplo con ReceptorNombre)
-            reporte.audit_batch(df_procesado, "ReceptorNombre")
+            # --- FASE C: APLICACIÓN DE TIPOS (Enforce) ---
+            # Coerción estricta de tipos SQL
+            df_final = aplicar_tipos_seguros(df_processed, REGLAS_TIPOS)
+            print("Tipado -> ", end="")
 
-            # Persistencia con validacion de redundancia (Smart Resume)
-            resultado_carga = upload_to_sql_blindado(df_procesado, tabla_destino)
+            # --- FASE D: AUDITORÍA Y CARGA (Audit & Load) ---
+            report.audit_batch(df_final, "ReceptorNombre")
 
-            if resultado_carga is True:
-                # Incremento de metricas en registros nuevos
-                reporte.update(len(df_procesado))
+            # Inserción atómica en base de datos
+            upload_success = upload_to_sql_blindado(df_final, "FACTURAS_CABECERA_V2")
+
+            if upload_success:
+                print("SQL: OK")
+                report.update_metrics(len(df_final))
             else:
-                # Barra de progreso durante el escaneo de datos existentes
-                imprimir_barra_progreso(
-                    lotes_analizados, 2000, prefijo="Analizando registros"
-                )
+                print("SQL: OMITIDO (Duplicados)")
 
-            # Pausa de estabilizacion para infraestructura (Discos G/H)
-            if lotes_analizados % 20 == 0:
-                time.sleep(5)
+            # Pausa técnica mínima para permitir flush de I/O si es necesario
+            # time.sleep(0.01)
 
-        # Cierre de auditoria y generacion de log
-        reporte.generate_final_log(status="EXITOSO")
-        print("\nProceso finalizado correctamente.")
-
+    except KeyboardInterrupt:
+        print("\n[WARN] Proceso interrumpido manualmente por el usuario.")
     except Exception as e:
-        reporte.generate_final_log(status="FALLIDO", error_msg=str(e))
-        print(f"\nError en ejecucion principal: {e}")
+        print(
+            f"\n[CRITICAL ERROR] Excepción no controlada en lote {processed_batches}."
+        )
+        print(f"Detalle: {e}")
+        print("-" * 40)
+        traceback.print_exc()
+
+        # Generación de reporte forense
+        report.generate_final_report(status="FAILED", error_details=str(e))
+        sys.exit(1)
+
+    # 4. Finalización y Reporteo
+    print("-" * 80)
+    log_path = report.generate_final_report(status="SUCCESS")
+    print(f"[INFO] Proceso finalizado. Log de auditoría: {log_path}")
 
 
 if __name__ == "__main__":

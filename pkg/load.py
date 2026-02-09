@@ -1,8 +1,18 @@
-import pyodbc
-import polars as pl
-import time
 import gc
-from pkg.globals import *
+import time
+
+import polars as pl
+import pyodbc
+
+from pkg.globals import (
+    DB_DRIVER,
+    DB_PASSWORD,
+    DB_SERVER,
+    DB_TRUSTED,
+    DB_USER,
+    SAT_DB_NAME,
+)
+
 
 def get_sql_connection(db_name=None):
     """
@@ -13,9 +23,14 @@ def get_sql_connection(db_name=None):
         pyodbc.Connection: Objeto de conexion activa.
     """
     database = db_name if db_name else SAT_DB_NAME
-    auth = "Trusted_Connection=yes;" if DB_TRUSTED.upper() in ["YES", "TRUE", "1"] else f"UID={DB_USER};PWD={DB_PASSWORD};"
+    auth = (
+        "Trusted_Connection=yes;"
+        if DB_TRUSTED.upper() in ["YES", "TRUE", "1"]
+        else f"UID={DB_USER};PWD={DB_PASSWORD};"
+    )
     conn_str = f"DRIVER={DB_DRIVER};SERVER={DB_SERVER};DATABASE={database};{auth}Encrypt=no;TrustServerCertificate=yes;"
     return pyodbc.connect(conn_str)
+
 
 def check_if_exists(cursor, table_name, uuid_value):
     """
@@ -31,8 +46,9 @@ def check_if_exists(cursor, table_name, uuid_value):
         query = f"SELECT TOP 1 1 FROM {table_name} WHERE UUID = ?"
         cursor.execute(query, (uuid_value,))
         return cursor.fetchone() is not None
-    except:
+    except Exception:
         return False
+
 
 def create_table_sat(cursor, table_name):
     """
@@ -80,6 +96,7 @@ def create_table_sat(cursor, table_name):
     """
     cursor.execute(ddl)
 
+
 def upload_to_sql_blindado(df: pl.DataFrame, table_name: str):
     """
     Realiza la carga masiva de datos mediante micro-lotes y confirmacion de transaccion.
@@ -89,38 +106,40 @@ def upload_to_sql_blindado(df: pl.DataFrame, table_name: str):
     Salida:
         bool: True si la insercion fue exitosa, False si el lote fue omitido.
     """
-    if df.is_empty(): 
+    if df.is_empty():
         return False
-    
+
     conn = get_sql_connection()
     try:
         cursor = conn.cursor()
         cursor.fast_executemany = True
-        
+
         create_table_sat(cursor, table_name)
         conn.commit()
 
-        primer_uuid = df['UUID'][0]
+        primer_uuid = df["UUID"][0]
         if check_if_exists(cursor, table_name, primer_uuid):
             return False
 
         cols = df.columns
         placeholders = ",".join(["?"] * len(cols))
-        insert_sql = f"INSERT INTO {table_name} ({','.join(cols)}) VALUES ({placeholders})"
-        
+        insert_sql = (
+            f"INSERT INTO {table_name} ({','.join(cols)}) VALUES ({placeholders})"
+        )
+
         rows = list(df.iter_rows())
-        
+
         cursor.executemany(insert_sql, rows)
-        conn.commit() 
-        
-        time.sleep(0.1) 
+        conn.commit()
+
+        time.sleep(0.1)
         del rows
-        gc.collect() 
-        
+        gc.collect()
+
         return True
-        
+
     except Exception as e:
         print(f"Error en carga masiva: {e}")
-        raise e 
+        raise e
     finally:
         conn.close()

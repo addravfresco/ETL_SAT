@@ -1,154 +1,61 @@
-"""
-PROFILE_DATA.PY
-------------------------------------------------------------------------------
-Radiografía de Datos REAL (Agnóstica).
-Lee el archivo fuente original y analiza TODAS las columnas que encuentre,
-sin depender de configuraciones externas.
-"""
-
-import time
-
-import polars as pl
+from pathlib import Path
 
 from pkg.extract import get_sat_reader
-from pkg.globals import RUTA_COMPLETA_SAT
 
-# Configuración
-MUESTRA_LOTES = 20  # 20 lotes de 50k = 1 Millón de filas
-BATCH_SIZE = 50000
+# --- CONFIGURACIÓN DE RUTAS ---
+RUTA_BASE = Path(r"V:\SAT")
+ARCHIVOS = [
+    "GERG_AECF_1891_Anexo1A-QA.txt",
+    "GERG_AECF_1891_Anexo2B.csv",
+    "GERG_AECF_1891_Anexo3C.csv",
+    "GERG_AECF_1891_Anexo4D.csv",
+    "GERG_AECF_1891_Anexo5E.csv",
+    "GERG_AECF_1891_Anexo6F.csv",
+    "GERG_AECF_1891_Anexo7G.csv",
+]
 
 
-def main():
-    print("🚀 INICIANDO PERFILADO DE DATOS ORIGINALES (RAW)...")
-    print(f"📂 Fuente: {RUTA_COMPLETA_SAT}")
-    print(
-        f"⏱️  Esto leerá los primeros {MUESTRA_LOTES * BATCH_SIZE / 1_000_000:.1f} millones de filas tal cual vienen."
-    )
+def profile_all_tables():
+    print("🚀 INICIANDO PERFILADO MULTITABLA - PERIODO: 2025_1S")
+    print("=" * 100)
 
-    start_time = time.time()
+    for nombre_archivo in ARCHIVOS:
+        ruta_completa = RUTA_BASE / nombre_archivo
+        if not ruta_completa.exists():
+            print(f"❌ Saltando: {nombre_archivo} (No encontrado)")
+            continue
 
-    # Instanciamos el lector (Este lee el TXT original byte a byte)
-    reader = get_sat_reader(str(RUTA_COMPLETA_SAT), batch_size=BATCH_SIZE)
+        print(f"\n🔍 ANALIZANDO: {nombre_archivo}")
 
-    # Leemos el primer lote para descubrir las columnas reales del archivo
-    first_batch = reader.next_batches(1)
-    if not first_batch:
-        print("❌ El archivo está vacío o no se pudo leer.")
-        return
+        # El lector híbrido ya maneja el encoding y errores de bytes
+        reader = get_sat_reader(str(ruta_completa), batch_size=50000)
+        chunk = reader.next_batches(1)
 
-    df_sample = first_batch[0]
-    columnas_reales = df_sample.columns
-    print(
-        f"🔍 Columnas detectadas en el archivo ({len(columnas_reales)}): {columnas_reales}"
-    )
+        if chunk:
+            df = chunk[0]
+            columnas = df.columns
+            total_filas = len(df)
 
-    # Inicializamos estadísticas para las columnas detectadas
-    global_stats = {
-        col: {"max_len": 0, "nulls": 0, "examples": set(), "dirty_chars": 0}
-        for col in columnas_reales
-    }
+            print(f"✅ Columnas detectadas: {len(columnas)}")
+            print(f"📊 Muestra inicial: {total_filas:,} filas")
 
-    # Reiniciamos el lector para empezar desde cero (opcional, pero más limpio)
-    reader = get_sat_reader(str(RUTA_COMPLETA_SAT), batch_size=BATCH_SIZE)
+            # Análisis de tipos y nulos
+            for col in columnas:
+                # Calculamos el % de nulos usando LaTeX para la representación
+                # $\text{null\_pct} = \frac{\text{null\_count}}{\text{total\_rows}} \times 100$
+                nulls = df[col].null_count()
+                null_pct = (nulls / total_filas) * 100
 
-    total_rows_processed = 0
-    batches_leidos = 0
+                # Identificación de tipos sugeridos
+                tipo_real = df[col].dtype
+                ejemplos = df[col].drop_nulls().head(2).to_list()
 
-    try:
-        while batches_leidos < MUESTRA_LOTES:
-            chunks = reader.next_batches(1)
-            if not chunks:
-                break
+                print(
+                    f"   - {col:<25} | {str(tipo_real):<10} | Nulls: {null_pct:>5.1f}% | Ex: {ejemplos}"
+                )
 
-            df = chunks[0]
-            current_rows = len(df)
-            total_rows_processed += current_rows
-
-            # Iteramos sobre las columnas que REALMENTE vienen en el archivo
-            for col in columnas_reales:
-                if col in df.columns:
-                    stats = global_stats[col]
-
-                    # 1. Análisis de Texto (Longitud y Suciedad)
-                    # Forzamos interpretación como string para medir longitud real
-                    serie_str = df[col].cast(pl.Utf8)
-
-                    batch_max = serie_str.str.len_bytes().max()
-                    if batch_max is not None and batch_max > stats["max_len"]:
-                        stats["max_len"] = batch_max
-
-                    # Buscamos caracteres peligrosos en columnas clave (RFCs/Montos)
-                    # (Ejemplo: Guiones en RFC o $ en Montos)
-                    if "RFC" in col.upper():
-                        stats["dirty_chars"] += serie_str.str.contains(r"[- /]").sum()
-                    elif "TOTAL" in col.upper() or "IMPORTE" in col.upper():
-                        stats["dirty_chars"] += serie_str.str.contains(r"[\$,]").sum()
-
-                    # 2. Conteo de Nulos
-                    stats["nulls"] += df[col].null_count()
-
-                    # 3. Muestreo (Solo valores no nulos y no vacíos)
-                    sample = serie_str.str.strip_chars().drop_nulls()
-                    sample = sample.filter(sample != "").head(3).to_list()
-                    stats["examples"].update(sample)
-
-            batches_leidos += 1
-            print(f"\r⏳ Escaneando: {total_rows_processed} filas...", end="")
-
-    except KeyboardInterrupt:
-        print("\n🛑 Detenido por usuario.")
-    except Exception as e:
-        print(f"\n❌ Error: {e}")
-
-    # --- REPORTE FINAL ---
-    print("\n\n" + "=" * 145)
-    print(
-        f"{' ':2} {'CAMPO REAL (TXT)':<30} | {'MAX LEN':<8} | {'% NULL':<8} | {'ALERTA':<10} | {'EJEMPLOS REALES'}"
-    )
-    print("=" * 145)
-
-    safe_total = total_rows_processed if total_rows_processed > 0 else 1
-
-    for col in columnas_reales:
-        stats = global_stats[col]
-        pct_null = (stats["nulls"] / safe_total) * 100
-
-        lista_ejemplos = list(stats["examples"])[:3]
-        ejemplos_str = ", ".join([str(x)[:35] for x in lista_ejemplos])
-
-        len_str = str(stats["max_len"])
-
-        # --- Lógica de Diagnóstico Automático ---
-        alert_msg = ""
-        prefix = "  "
-
-        # 1. Alerta RFC Sucio
-        if "RFC" in col.upper() and stats["dirty_chars"] > 0:
-            alert_msg = "SUCIO (-/ )"
-            prefix = "🔴"
-        # 2. Alerta RFC Largo
-        elif "RFC" in col.upper() and stats["max_len"] > 13:
-            alert_msg = "LARGO >13"
-            prefix = "🔴"
-        # 3. Alerta Monto Sucio
-        elif ("TOTAL" in col.upper() or "SUB" in col.upper()) and stats[
-            "dirty_chars"
-        ] > 0:
-            alert_msg = "TEXTO ($,)"
-            prefix = "🔴"
-        # 4. Alerta Texto Gigante
-        elif stats["max_len"] > 300:
-            alert_msg = "TRUNCAR"
-            prefix = "⚠️ "
-
-        print(
-            f"{prefix} {col:<30} | {len_str:<8} | {pct_null:5.1f}%   | {alert_msg:<10} | {ejemplos_str}"
-        )
-
-    duration = time.time() - start_time
-    print("=" * 145)
-    print(f"✅ Análisis completado en {duration:.2f} segundos.")
+        print("-" * 100)
 
 
 if __name__ == "__main__":
-    main()
+    profile_all_tables()

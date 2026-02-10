@@ -1,89 +1,85 @@
 """
-EXTRACT.PY
+EXTRACT.PY - MÓDULO DE INGESTIÓN DE DATOS HÍBRIDA (RESILIENTE)
 ------------------------------------------------------------------------------
-Módulo de Ingestión de Datos Híbrida.
+Este módulo implementa una arquitectura de lectura en dos etapas para
+estabilizar la ingesta de archivos masivos del SAT (Anexos 1A a 7G).
 
-Este módulo implementa una estrategia de lectura que combina el manejo de archivos
-nativo de Python (io/itertools) con el motor de parseo de Polars.
-Su objetivo principal es garantizar la continuidad del flujo de datos (Stream)
-incluso ante la presencia de bytes corruptos o secuencias de codificación mixta
-que detendrían a un lector CSV estándar.
+Estrategia Técnica:
+    1. Saneamiento Nativo (Python): Utiliza manejadores de archivos con
+       estrategia de error 'replace' para neutralizar bytes corruptos o
+       secuencias de codificación mixta (UTF-8/CP1252).
+    2. Parseo de Alto Rendimiento (Polars): Ingiere fragmentos de memoria
+       saneados forzando el tipo 'String' (Utf8) para todas las columnas,
+       delegando el tipado final a la etapa de 'Enforcement'.
+
+Ventaja Arquitectónica:
+    Evita colapsos en el motor C++ de Polars ante inconsistencias de
+    codificación, garantizando la continuidad del flujo de datos (Stream).
 """
 
 import io
 import itertools
+from typing import List, Optional
 
 import polars as pl
 
 
 class HybridSatReader:
     """
-    Adaptador de lectura que bufferiza líneas de texto crudo utilizando los
-    manejadores de codificación permisivos de Python ('replace') y alimenta
-    a Polars con fragmentos de memoria saneados.
-
-    Attributes:
-        f (file object): Descriptor de archivo abierto con estrategia de reemplazo de errores.
-        batch_size (int): Cantidad de líneas a procesar por iteración de lectura.
-        header (str): Cabecera CSV preservada para reconstruir el contexto en cada lote.
+    Adaptador de lectura bufferizada que actúa como puente entre el sistema
+    de archivos y el motor de Polars.
     """
 
     def __init__(self, file_path: str, batch_size: int):
         """
-        Inicializa el lector de archivos con codificación 'cp1252' y estrategia de recuperación.
+        Inicializa el descriptor de archivo con políticas de recuperación.
 
         Args:
-            file_path (str): Ruta absoluta al archivo fuente.
-            batch_size (int): Número de filas a leer por lote.
+            file_path (str): Ruta absoluta o relativa al recurso.
+            batch_size (int): Volumen de filas a procesar por iteración.
         """
-        # Se utiliza 'errors="replace"' para sustituir bytes ilegibles por el caracter
-        # de reemplazo Unicode (\ufffd) sin interrumpir la ejecución.
+        # Apertura permisiva para evitar excepciones por 'charmap' codecs
         self.f = open(file_path, "r", encoding="cp1252", errors="replace")
         self.batch_size = batch_size
 
+        # Preservación de la cabecera para reconstrucción de contexto en chunks
         try:
             self.header = next(self.f)
         except StopIteration:
             self.header = ""
 
-    def next_batches(self, n: int = 1) -> list[pl.DataFrame] | None:
+    def next_batches(self, n: int = 1) -> Optional[List[pl.DataFrame]]:
         """
-        Recupera el siguiente bloque de líneas y lo convierte en un DataFrame de Polars.
+        Extrae el siguiente lote de datos y lo transforma en un DataFrame.
 
-        El proceso realiza una limpieza intermedia de codificación para asegurar
-        que el buffer de memoria sea compatible con el parser C++ de Polars.
-
-        Args:
-            n (int): Número de lotes a recuperar (Mantenido por compatibilidad de interfaz).
+        Implementa una re-codificación de seguridad para asegurar que el
+        buffer de memoria sea compatible con el parser de Polars.
 
         Returns:
-            list[pl.DataFrame] | None: Lista conteniendo el DataFrame del lote actual,
-                                       o None si se ha alcanzado el EOF (Fin de Archivo).
+            Optional[List[pl.DataFrame]]: Lista con el lote procesado o
+                                          None si se alcanza el fin del archivo.
         """
-        # Lectura eficiente de N líneas usando iteradores para minimizar impacto en RAM
+        # Extracción eficiente de líneas vía iteradores (Lazy Load)
         lines = list(itertools.islice(self.f, self.batch_size))
 
         if not lines:
             self.f.close()
             return None
 
+        # Reconstrucción del fragmento de memoria
         chunk_str = self.header + "".join(lines)
 
-        # Re-codificación Crítica:
-        # El caracter de reemplazo Unicode (\ufffd) generado por Python no existe en cp1252.
-        # Se fuerza una nueva codificación con reemplazo ('?') para evitar errores de
-        # 'charmap codec' al pasar el buffer a Polars.
+        # Saneamiento de bytes crítico para estabilidad del parser
         chunk_bytes = chunk_str.encode("cp1252", errors="replace")
 
-        # Parseo del stream de bytes saneado
+        # Ingesta masiva forzando esquema neutro (Utf8)
         df = pl.read_csv(
             io.BytesIO(chunk_bytes),
             separator="|",
             encoding="cp1252",
             ignore_errors=True,
             truncate_ragged_lines=True,
-            # Se fuerza la inferencia como String para evitar errores de tipo
-            # previos a la etapa de limpieza y transformación.
+            # Se desactiva la inferencia para permitir tipado dinámico posterior
             infer_schema_length=0,
         )
 
@@ -94,14 +90,14 @@ def get_sat_reader(
     file_path: str, batch_size: int = 50000, schema=None
 ) -> HybridSatReader:
     """
-    Función factoría para instanciar el HybridSatReader.
+    Función factoría para la instanciación estandarizada del lector híbrido.
 
     Args:
-        file_path (str): Ruta al archivo.
-        batch_size (int): Tamaño del lote.
-        schema (dict, optional): Esquema (no utilizado en modo híbrido texto).
+        file_path (str): Ubicación del archivo fuente.
+        batch_size (int): Tamaño del lote (default: 50,000 registros).
+        schema: Reservado para compatibilidad con interfaces futuras.
 
     Returns:
-        HybridSatReader: Instancia configurada del lector.
+        HybridSatReader: Instancia configurada para el procesamiento masivo.
     """
     return HybridSatReader(file_path, batch_size)
